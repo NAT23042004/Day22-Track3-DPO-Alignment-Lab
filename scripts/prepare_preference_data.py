@@ -52,11 +52,22 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    def render_chat(messages, *, add_generation_prompt=False):
+        if tokenizer.chat_template:
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=add_generation_prompt
+            )
+        text = "".join(
+            f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+            for message in messages
+        )
+        if add_generation_prompt:
+            text += "<|im_start|>assistant\n"
+        return text
+
     def fmt(row):
         prompt_msgs = [{"role": "user", "content": row["prompt"]}]
-        prompt_text = tokenizer.apply_chat_template(
-            prompt_msgs, tokenize=False, add_generation_prompt=True
-        )
+        prompt_text = render_chat(prompt_msgs, add_generation_prompt=True)
         chosen = row["chosen"][-1]["content"] if isinstance(row["chosen"], list) else row["chosen"]
         rejected = row["rejected"][-1]["content"] if isinstance(row["rejected"], list) else row["rejected"]
         return {"prompt": prompt_text, "chosen": chosen, "rejected": rejected}

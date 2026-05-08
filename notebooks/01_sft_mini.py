@@ -41,7 +41,7 @@ else:  # BIGGPU
     PER_DEVICE_BATCH = 2
     GRAD_ACCUM = 4
 
-SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-cleaned")
+SFT_DATASET = os.environ.get("SFT_DATASET", "5CD-AI/Vietnamese-alpaca-gpt4-gg-translated")
 SFT_SLICE = 1000
 NUM_EPOCHS = 1
 
@@ -85,6 +85,26 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
     print("Set tokenizer.pad_token = eos_token")
 
+
+def render_chat(messages, *, add_generation_prompt=False, return_tensors=None):
+    if tokenizer.chat_template:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=return_tensors is not None,
+            return_tensors=return_tensors,
+            add_generation_prompt=add_generation_prompt,
+        )
+
+    text = "".join(
+        f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+        for message in messages
+    )
+    if add_generation_prompt:
+        text += "<|im_start|>assistant\n"
+    if return_tensors is not None:
+        return tokenizer(text, return_tensors=return_tensors).input_ids
+    return text
+
 # %%
 model = FastLanguageModel.get_peft_model(
     model,
@@ -106,7 +126,7 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 # %% [markdown]
 # ## 2. Load + format VN Alpaca slice
 #
-# `5CD-AI/Vietnamese-alpaca-cleaned` is a 50k-row VN Alpaca translation. Lab 21
+# `5CD-AI/Vietnamese-alpaca-gpt4-gg-translated` is a VN Alpaca translation. Lab 21
 # uses 1k slice for the demo run; we match that exactly so reward gap is comparable.
 
 # %%
@@ -120,18 +140,24 @@ print(f"\nFirst row:\n{ds[0]}")
 # Alpaca → ChatML format (Qwen2.5's native template)
 def format_alpaca_to_chat(row):
     messages = []
-    if row.get("instruction"):
-        prompt = row["instruction"]
-        if row.get("input"):
-            prompt += "\n\n" + row["input"]
+    instruction = row.get("instruction") or row.get("instruction_vi") or row.get("instruction_en")
+    input_text = row.get("input") or row.get("input_vi") or row.get("input_en")
+    output = row.get("output") or row.get("output_vi") or row.get("output_en")
+
+    if instruction:
+        prompt = instruction
+        if input_text:
+            prompt += "\n\n" + input_text
         messages.append({"role": "user", "content": prompt})
-    if row.get("output"):
-        messages.append({"role": "assistant", "content": row["output"]})
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    if output:
+        messages.append({"role": "assistant", "content": output})
+    text = render_chat(messages, add_generation_prompt=False)
     return {"text": text}
 
 
 ds_formatted = ds.map(format_alpaca_to_chat, remove_columns=ds.column_names)
+ds_formatted = ds_formatted.filter(lambda row: bool(row["text"].strip()))
+print(f"Formatted {len(ds_formatted)} non-empty rows.")
 print(f"\nSample formatted text (first 500 chars):\n{ds_formatted[0]['text'][:500]}")
 
 # %% [markdown]
@@ -204,9 +230,7 @@ print(f"Saved SFT adapter to {ADAPTER_OUT}")
 FastLanguageModel.for_inference(model)
 prompt = "Giải thích ngắn gọn (3-4 câu) thuật toán quicksort hoạt động thế nào."
 messages = [{"role": "user", "content": prompt}]
-inputs = tokenizer.apply_chat_template(
-    messages, return_tensors="pt", add_generation_prompt=True
-).to("cuda")
+inputs = render_chat(messages, return_tensors="pt", add_generation_prompt=True).to("cuda")
 with torch.no_grad():
     out = model.generate(input_ids=inputs, max_new_tokens=200, do_sample=False)
 generated = tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)

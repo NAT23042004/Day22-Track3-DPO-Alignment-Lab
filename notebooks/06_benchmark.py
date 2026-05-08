@@ -193,14 +193,32 @@ def generate_with_adapter(adapter_path, prompts, max_new_tokens=256):
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    def render_chat(messages, *, add_generation_prompt=False, return_tensors=None):
+        if tokenizer.chat_template:
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=return_tensors is not None,
+                return_tensors=return_tensors,
+                add_generation_prompt=add_generation_prompt,
+            )
+        text = "".join(
+            f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+            for message in messages
+        )
+        if add_generation_prompt:
+            text += "<|im_start|>assistant\n"
+        if return_tensors is not None:
+            return tokenizer(text, return_tensors=return_tensors).input_ids
+        return text
+
     model = PeftModel.from_pretrained(model, str(adapter_path))
     FastLanguageModel.for_inference(model)
 
     outputs = []
     for p in prompts:
         msgs = [{"role": "user", "content": p["prompt"]}]
-        inp = tokenizer.apply_chat_template(msgs, return_tensors="pt",
-                                            add_generation_prompt=True).to("cuda")
+        inp = render_chat(msgs, return_tensors="pt", add_generation_prompt=True).to("cuda")
         with torch.no_grad():
             out = model.generate(input_ids=inp, max_new_tokens=max_new_tokens,
                                  do_sample=False, pad_token_id=tokenizer.eos_token_id)
