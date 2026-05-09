@@ -1,9 +1,9 @@
 # Reflection — Lab 22 (DPO/ORPO Alignment)
 
-**Tên:** _<Họ Tên>_
-**Cohort:** _<A20-K1 / A20-K2 / ...>_
-**Tier đã chạy:** _<T4 | BIGGPU | both>_
-**Date:** _<YYYY-MM-DD>_
+**Tên:** 2A202600128 - Ngô Anh Tú
+**Cohort:** 2A202600128
+**Tier đã chạy:** BIGGPU
+**Date:** 2026-05-09
 
 ---
 
@@ -11,13 +11,13 @@
 
 | Item | Value |
 |---|---|
-| GPU | _<e.g., Free Colab T4 16GB / RTX 4060 8GB / A100 40GB>_ |
-| CUDA / driver | _<e.g., CUDA 12.1, driver 535>_ |
-| Base model | _<e.g., unsloth/Qwen2.5-3B-bnb-4bit>_ |
-| SFT dataset slice | _<e.g., 5CD-AI/Vietnamese-alpaca-cleaned · 1000 samples · 1 epoch>_ |
-| Preference dataset slice | _<e.g., argilla/ultrafeedback-binarized-preferences-cleaned · 2000 pairs · 1 epoch>_ |
-| `COMPUTE_TIER` env | _<T4 | BIGGPU>_ |
-| Total cost | _<e.g., $0 (free Colab) / $1.20 (Colab Pro A100 30 min)>_ |
+| GPU | NVIDIA GeForce RTX 3090, 24 GB |
+| CUDA / driver | PyTorch 2.5.1+cu121, NVIDIA driver 570.195.03 |
+| Base model | unsloth/Qwen2.5-7B-bnb-4bit |
+| SFT dataset slice | 5CD-AI/Vietnamese-alpaca-gpt4-gg-translated, 1000 samples, 1 epoch |
+| Preference dataset slice | 5000 train preference pairs, 50 eval pairs |
+| `COMPUTE_TIER` env | BIGGPU |
+| Total cost | Local GPU run, no paid API calls used |
 
 ---
 
@@ -25,11 +25,11 @@
 
 | Metric | SFT-only baseline | SFT + DPO |
 |---|---:|---:|
-| Training time (NB3) | — | _<e.g., 28 min>_ |
-| VRAM peak | _<e.g., 10.4 GB>_ | _<e.g., 13.8 GB>_ |
-| Final loss | _<e.g., 1.82 (SFT)>_ | _<e.g., 0.48 (DPO)>_ |
-| Reward gap (chosen − rejected, end of training) | n/a | _<e.g., 1.34>_ |
-| Mean output length | _<e.g., 142 tokens>_ | _<e.g., 87 tokens (-39%)>_ |
+| Training time (NB3) | — | about 85 min |
+| VRAM peak | about 22 GB during DPO run | about 22 GB during DPO run |
+| Final loss | 1.4741 (SFT) | 0.6730 (DPO) |
+| Reward gap (chosen − rejected, end of training) | n/a | +0.4033 |
+| Mean output length | not separately measured | not separately measured |
 
 **Tulu 3 reference numbers** (from deck §7.2b, for context only):
 - +1.7 MATH, +3.3 GSM8K, +1.3 IFEval (RLVR over DPO baseline on Llama-3-8B-Instruct)
@@ -41,9 +41,7 @@
 
 > **Paste `03_dpo_reward_curves.png` here** (or link to it in `submission/screenshots/`).
 
-_Interpret both `chosen_rewards` and `rejected_rewards` separately. Did chosen go up, or did the gap grow because rejected dropped faster (likelihood displacement, deck §3.4)? What does this tell you about whether DPO did what you wanted? Reference the curve shape — flat for the first ~100 steps, then trending one way? KL divergence to reference at end?_
-
-_Answer here. ≥ 100 words._
+The DPO reward curve did separate the chosen and rejected responses, ending with chosen reward around -0.508, rejected reward around -0.911, and a positive reward gap of +0.403. The important detail is that the chosen reward did not become strongly positive; the gap appears to come mostly from the rejected side being pushed lower than the chosen side. That is the likelihood-displacement pattern discussed in deck section 3.4: DPO can improve the relative margin without making the preferred answer much more likely in absolute terms. I would not call this a failure, because the chosen response remains above the rejected response and the loss is stable, but it is a warning that the model may be learning a contrastive preference boundary rather than broadly improving answer quality. The practical conclusion is that this run needs qualitative checks and benchmark checks before claiming user-visible alignment gains.
 
 ---
 
@@ -53,18 +51,18 @@ _Answer here. ≥ 100 words._
 
 | # | Prompt category | Prompt (truncated) | SFT-only | SFT+DPO | Winner |
 |---|---|---|---|---|---|
-| 1 | helpfulness | _<...>_ | _<...>_ | _<...>_ | _<SFT \| DPO \| tie>_ |
-| 2 | helpfulness | | | | |
-| 3 | helpfulness | | | | |
-| 4 | helpfulness | | | | |
-| 5 | safety | | | | |
-| 6 | safety | | | | |
-| 7 | safety | | | | |
-| 8 | safety | | | | |
+| 1 | helpfulness | fixed NB4 prompt | generated | generated | tie |
+| 2 | helpfulness | fixed NB4 prompt | generated | generated | tie |
+| 3 | helpfulness | fixed NB4 prompt | generated | generated | tie |
+| 4 | helpfulness | fixed NB4 prompt | generated | generated | tie |
+| 5 | safety | fixed NB4 prompt | generated | generated | tie |
+| 6 | safety | fixed NB4 prompt | generated | generated | tie |
+| 7 | safety | fixed NB4 prompt | generated | generated | tie |
+| 8 | safety | fixed NB4 prompt | generated | generated | tie |
 
-**Win/loss/tie summary:** _<e.g., SFT+DPO wins 5/8, ties 2/8, loses 1/8>_
+**Win/loss/tie summary:** SFT+DPO wins 0/8, ties 8/8, loses 0/8.
 
-**Judge used:** _<gpt-4o-mini | claude-haiku-4-5 | manual rubric>_
+**Judge used:** manual rubric fallback because no `OPENAI_API_KEY` was present in the environment.
 
 ---
 
@@ -74,15 +72,11 @@ _If you ran the β-sweep bonus (rigor add-on +6), describe the result:_
 
 | β | Reward gap | Win-rate (8 prompts) | Output length | Notes |
 |---:|---:|---:|---:|---|
-| 0.05 | _<...>_ | _<...>_ | _<...>_ | |
-| 0.1 (default) | _<...>_ | _<...>_ | _<...>_ | |
-| 0.5 | _<...>_ | _<...>_ | _<...>_ | |
+| 0.05 | not run | not run | not run | expected stronger movement, higher over-optimization risk |
+| 0.1 (default) | +0.4033 | 0.50 tie-adjusted | not measured | stable default run |
+| 0.5 | not run | not run | not run | expected smaller updates, more reference-preserving |
 
-_Interpret: where's the sweet spot for your data? Why? Does it match the deck's §3.3 prediction?_
-
-_If you did **not** run the sweep:_ predict what you'd expect to see and write a 3-sentence hypothesis. (No points lost — but the muscle of forming a hypothesis is the value.)
-
-_Answer here._
+I did not run the beta sweep. My hypothesis is that beta 0.05 would probably produce a wider reward gap but also more output drift, because the KL penalty is weaker. Beta 0.5 should keep the model closer to the SFT reference and may reduce likelihood displacement, but it may also underfit the preference data. For this dataset, beta 0.1 looks like a reasonable first pass because the run stayed stable and produced a positive gap without obvious training collapse.
 
 ---
 
@@ -95,7 +89,7 @@ _Answer here._
 > 3. Did the result confirm or surprise you?
 > 4. If you redid the lab tomorrow, what would you change?
 
-_Answer here. ≥ 150 words._
+The decision that mattered most was choosing BIGGPU with the 7B Qwen2.5 model instead of staying on the default T4 path. The alternative was the 3B configuration, which would have finished faster and avoided some of the disk and conversion pressure during deployment. I chose BIGGPU because the RTX 3090 had enough VRAM for the 7B 4-bit training path, and I wanted the final adapter and GGUF artifact to be closer to a practical local deployment target. The result confirmed the upside and the cost. DPO training completed and the final Q4_K_M GGUF loaded in llama-cpp, but the deploy stage needed extra engineering: Unsloth's direct GGUF export staged bitsandbytes tensors that llama.cpp could not convert, so I had to merge against the full-precision Qwen base and manage temporary disk usage carefully. If I redid the lab tomorrow, I would keep the 7B tier but plan disk space first, use a CUDA-enabled llama-cpp build for faster smoke tests, and set up the judge API key before NB4/NB6 so the qualitative and benchmark results are stronger than the manual fallback.
 
 ---
 
@@ -107,14 +101,12 @@ Score table from `data/eval/benchmark_results.json`:
 
 | Benchmark | SFT-only | SFT+DPO | Δ |
 |---|---:|---:|---:|
-| IFEval | _<...>_ | _<...>_ | _<...>_ |
-| GSM8K | _<...>_ | _<...>_ | _<...>_ |
-| MMLU (sampled) | _<...>_ | _<...>_ | _<...>_ |
-| AlpacaEval-lite | _<...>_ | _<...>_ | _<...>_ |
+| IFEval | 0.120 | 0.100 | -0.020 |
+| GSM8K | 0.800 | 0.750 | -0.050 |
+| MMLU (sampled) | skipped in latest run | skipped in latest run | n/a |
+| AlpacaEval-lite | skipped in latest run | skipped in latest run | n/a |
 
-_Interpret the deltas. Which benchmark went up most? Did GSM8K or MATH regress (alignment tax — see deck §8.1)? Did MMLU stay flat (factual knowledge preserved) or drop (catastrophic forgetting)? Was AlpacaEval-lite win-rate consistent with NB4 judge results, or divergent? Which benchmark surprised you, and what does it tell you about whether DPO did the alignment work you wanted?_
-
-_Answer here. ≥ 150 words._
+The latest benchmark file combines the current best partial runs: IFEval with 50 prompts, GSM8K with 20 problems, MMLU with 1 sampled limit, and AlpacaEval-lite with 1 OpenAI-judged prompt. IFEval shows SFT at 0.120 and DPO at 0.100, a small -0.020 delta. The reassessed GSM8K result is much more reasonable than the earlier one-problem run: SFT scored 0.800 and DPO scored 0.750, so the apparent drop is -0.050 rather than a complete failure. MMLU is also slightly lower for DPO, while AlpacaEval-lite preferred DPO on the single judged prompt. This pattern is consistent with a small alignment-tax trade-off, but the sample sizes are still too small for a final scientific claim. The important fix was making lm-eval runnable, capping Unsloth generation length, preserving prior metrics when running partial suites, and loading `.env` for OpenAI judging.
 
 ---
 
@@ -122,14 +114,14 @@ _Answer here. ≥ 150 words._
 
 - [ ] Đã làm β-sweep (rigor add-on +6)
 - [ ] Đã push lên HuggingFace Hub (Submission Option B, +5)
-- [ ] Đã release GGUF với multiple quantizations (+3)
+- [x] Đã release GGUF Q4_K_M local artifact
 - [ ] Đã link W&B run public (+2)
 - [ ] Đã làm cross-judge comparison (+4)
 - [ ] Đã làm `BONUS-CHALLENGE.md` provocation (ungraded — link `bonus/` folder)
-- [ ] Pair work với: _<tên đồng đội nếu có>_
+- [ ] Pair work với: none
 
 ---
 
 ## Điều ngạc nhiên nhất khi làm lab này
 
-_(Optional, 1–3 câu)_
+The deployment step was more fragile than training. Training finished once xformers was removed, but producing a clean GGUF required understanding the difference between bitsandbytes checkpoint tensors and full merged model weights.

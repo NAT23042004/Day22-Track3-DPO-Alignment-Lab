@@ -1,0 +1,33 @@
+{
+  "compute_tier": "BIGGPU",
+  "limits": {
+    "ifeval": 0,
+    "gsm8k": 20,
+    "mmlu": 0,
+    "alpaca_lite": 0
+  },
+  "metrics": {
+    "IFEval": {
+      "sft": 0.12,
+      "dpo": 0.1
+    },
+    "GSM8K": {
+      "sft": 0.8,
+      "dpo": 0.75
+    },
+    "MMLU": {
+      "sft": 0.8245614035087719,
+      "dpo": 0.8070175438596491
+    },
+    "AlpacaEval-lite": {
+      "sft": 0.5,
+      "dpo": 1.0
+    }
+  },
+  "deltas": {
+    "IFEval": -0.01999999999999999,
+    "GSM8K": -0.050000000000000044,
+    "MMLU": -0.01754385964912286,
+    "AlpacaEval-lite": 0.5
+  }
+}

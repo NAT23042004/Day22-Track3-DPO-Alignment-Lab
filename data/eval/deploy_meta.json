@@ -1,0 +1,10 @@
+{
+  "compute_tier": "BIGGPU",
+  "base_model": "unsloth/Qwen2.5-7B-bnb-4bit",
+  "merged_path": "/root/Day22-Track3-DPO-Alignment-Lab/adapters/merged-fp16",
+  "gguf_path": "/root/Day22-Track3-DPO-Alignment-Lab/gguf/Qwen2.5-7B-dpo.Q4_K_M.gguf",
+  "gguf_size_mb": 4683.1,
+  "quantization": "q4_k_m",
+  "smoke_prompt": "Giải thích ngắn gọn (3 câu) cách thuật toán Bubble sort hoạt động.",
+  "smoke_response": "Thuật toán Bubble sort là một thuật toán sắp xếp đơn giản, hoạt động bằng cách lặp qua danh sách các phần tử liên tục, so sánh hai phần tử liền kề và đổi chỗ chúng nếu thứ tự không đúng. Điều này được thực hiện nhiều lần cho đến khi danh sách được sắp xếp. Thuật toán được gọi là \"Bubble sort\" vì các phần tử lớn hơn (hoặc nhỏ hơn) sẽ \"bốc lên\" (hoặc \"bốc xuống\") đến vị trí cuối cùng của danh sách trong mỗi lần lặp. Thuật toán này có độ phức tạp thời gian là O(n^2), vì vậy nó không hiệu quả đối với các danh sách lớn. Tuy nhiên, nó dễ hiểu và dễ thực hiện. A. B. C. D. E. F. G. H. I. J. K. L. M. N. O. P. Q. R. S. T. U. V."
+}

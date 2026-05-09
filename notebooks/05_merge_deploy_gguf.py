@@ -21,12 +21,20 @@
 # %%
 import os
 import json
+import gc
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 BASE_MODEL = (
     "unsloth/Qwen2.5-3B-bnb-4bit" if COMPUTE_TIER == "T4"
     else "unsloth/Qwen2.5-7B-bnb-4bit"
+)
+FULL_BASE_MODEL = (
+    "Qwen/Qwen2.5-3B" if COMPUTE_TIER == "T4"
+    else "Qwen/Qwen2.5-7B"
 )
 MAX_LEN = 512 if COMPUTE_TIER == "T4" else 1024
 
@@ -36,10 +44,13 @@ MERGED_PATH = REPO_ROOT / "adapters" / "merged-fp16"
 GGUF_DIR = REPO_ROOT / "gguf"
 MERGED_PATH.mkdir(parents=True, exist_ok=True)
 GGUF_DIR.mkdir(parents=True, exist_ok=True)
+BF16_GGUF = GGUF_DIR / f"{FULL_BASE_MODEL.split('/')[-1]}-dpo.BF16.gguf"
+Q4_GGUF = GGUF_DIR / f"{FULL_BASE_MODEL.split('/')[-1]}-dpo.Q4_K_M.gguf"
 
 assert DPO_PATH.exists(), "NB3 must run first"
 
 print(f"COMPUTE_TIER:    {COMPUTE_TIER}")
+print(f"FULL_BASE_MODEL: {FULL_BASE_MODEL}")
 print(f"DPO adapter:     {DPO_PATH}")
 print(f"merged output:   {MERGED_PATH}")
 print(f"GGUF output:     {GGUF_DIR}")
@@ -53,79 +64,99 @@ assert torch.cuda.is_available()
 # ## 1. Load DPO model + merge adapter
 
 # %%
-from unsloth import FastLanguageModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=BASE_MODEL,
-    max_seq_length=MAX_LEN,
-    dtype=None,
-    load_in_4bit=True,
-)
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+full_cache = REPO_ROOT / ".hf-full-cache"
+model_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
-# Stack SFT-mini → DPO adapters
-SFT_PATH = REPO_ROOT / "adapters" / "sft-mini"
-model = PeftModel.from_pretrained(model, str(SFT_PATH))
-print(f"Loaded SFT-mini adapter from {SFT_PATH}")
+if BF16_GGUF.exists() or Q4_GGUF.exists():
+    print("Reusing existing GGUF intermediate/final artifact; skipping HF merge.")
+else:
+    tokenizer = AutoTokenizer.from_pretrained(FULL_BASE_MODEL, cache_dir=str(full_cache))
+    model = AutoModelForCausalLM.from_pretrained(
+        FULL_BASE_MODEL,
+        torch_dtype=model_dtype,
+        device_map={"": "cuda:0"},
+        cache_dir=str(full_cache),
+        low_cpu_mem_usage=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-# %% [markdown]
-# > **Note:** The DPO adapter trained in NB3 stacks on top of SFT. To get a fully
-# > aligned merged model, we apply both adapters before merging. Unsloth's
-# > `save_pretrained_merged` handles the SFT + DPO + base merge in one shot.
+    # The DPO checkpoint contains the final LoRA weights after starting from SFT.
+    # Load the post-DPO adapter directly for deployment.
+    model = PeftModel.from_pretrained(model, str(DPO_PATH))
+    print(f"Loaded DPO adapter from {DPO_PATH}")
 
-# %% [markdown]
-# ## 2. Save merged FP16 weights
-#
-# `save_pretrained_merged(method="merged_16bit")` produces a HuggingFace-format
-# directory you can either upload to HF Hub directly OR feed into the GGUF
-# converter in step 3.
+    # The full base checkpoint is only needed for loading. Remove its temporary
+    # cache before writing merged + intermediate GGUF files so the lab fits on
+    # small disks.
+    if full_cache.exists():
+        shutil.rmtree(full_cache)
 
-# %%
-# This re-loads the model with both SFT and DPO adapters merged into base weights.
-# Output is FP16 (or BF16 on Ampere+) HF-format weights ready for inference.
-model.save_pretrained_merged(
-    str(MERGED_PATH),
-    tokenizer,
-    save_method="merged_16bit",
-)
-print(f"Saved merged FP16 to {MERGED_PATH}")
+    model = model.merge_and_unload()
+    model.save_pretrained(
+        str(MERGED_PATH),
+        safe_serialization=True,
+        max_shard_size="5GB",
+    )
+    tokenizer.save_pretrained(str(MERGED_PATH))
+    print(f"Saved merged HF weights to {MERGED_PATH}")
 
-# Free GPU memory before GGUF conversion (which spawns a subprocess that needs RAM)
-import gc
-
-del model
-gc.collect()
-torch.cuda.empty_cache()
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
 
 # %% [markdown]
-# ## 3. Quantize to GGUF Q4_K_M
+# > **Note:** The DPO adapter saved in NB3 already contains the final LoRA weights
+# > after DPO training initialized from SFT-mini. Loading that adapter onto the
+# > base model gives the aligned policy for export.
+
+# %% [markdown]
+# ## 2. Quantize to GGUF Q4_K_M
 #
 # Q4_K_M is the sweet spot: ~4× compression vs FP16, minimal quality loss.
-# Unsloth wraps llama.cpp's `quantize` binary — first run downloads + compiles
-# llama.cpp (~3 min) then quantizes (~30 s).
-
-# %%
-# Reload the merged model — Unsloth's GGUF saver expects a live model handle.
-from unsloth import FastLanguageModel as FLM
-
-model, tokenizer = FLM.from_pretrained(
-    model_name=str(MERGED_PATH),
-    max_seq_length=MAX_LEN,
-    dtype=None,
-    load_in_4bit=False,    # already merged; load full precision
-)
+# We call llama.cpp directly so conversion starts from clean merged bf16 weights,
+# not the original bitsandbytes checkpoint.
 
 # %%
 # Save GGUF in 1 quantization tier (Q4_K_M). Add more tiers below if you want the
 # +3 "GGUF release published" rigor add-on.
-model.save_pretrained_gguf(
-    str(GGUF_DIR),
-    tokenizer,
-    quantization_method="q4_k_m",
-)
-print(f"Saved GGUF Q4_K_M to {GGUF_DIR}")
+converter = Path("/root/.unsloth/llama.cpp/unsloth_convert_hf_to_gguf.py")
+quantizer = Path("/root/.unsloth/llama.cpp/llama-quantize")
+assert converter.exists(), f"llama.cpp converter missing: {converter}"
+assert quantizer.exists(), f"llama.cpp quantizer missing: {quantizer}"
+
+bf16_gguf = BF16_GGUF
+q4_gguf = Q4_GGUF
+
+if not bf16_gguf.exists() and not q4_gguf.exists():
+    subprocess.run(
+        [
+            sys.executable,
+            str(converter),
+            "--outfile",
+            str(bf16_gguf),
+            "--outtype",
+            "bf16",
+            "--split-max-size",
+            "50G",
+            str(MERGED_PATH),
+        ],
+        check=True,
+    )
+
+# The BF16 GGUF is self-contained. Drop merged HF shards before quantization so
+# Q4_K_M can finish on disks with < 20 GB free.
+if MERGED_PATH.exists():
+    shutil.rmtree(MERGED_PATH)
+MERGED_PATH.mkdir(parents=True, exist_ok=True)
+if not q4_gguf.exists():
+    subprocess.run([str(quantizer), str(bf16_gguf), str(q4_gguf), "Q4_K_M"], check=True)
+if bf16_gguf.exists():
+    bf16_gguf.unlink(missing_ok=True)
+print(f"Saved GGUF Q4_K_M to {q4_gguf}")
 
 # %% [markdown]
 # ### 3a. Optional — additional quantization tiers (for the +3 rigor add-on)
@@ -146,7 +177,6 @@ for p in sorted(GGUF_DIR.iterdir()):
         size_mb = p.stat().st_size / 1e6
         print(f"  {p.name:50s}  {size_mb:>8.1f} MB")
 
-del model
 gc.collect()
 torch.cuda.empty_cache()
 

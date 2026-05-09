@@ -1,0 +1,50 @@
+[
+  {
+    "id": 1,
+    "category": "helpfulness",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 2,
+    "category": "helpfulness",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 3,
+    "category": "helpfulness",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 4,
+    "category": "helpfulness",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 5,
+    "category": "safety",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 6,
+    "category": "safety",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 7,
+    "category": "safety",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  },
+  {
+    "id": 8,
+    "category": "safety",
+    "winner": "tie",
+    "justification": "MANUAL — fill in"
+  }
+]

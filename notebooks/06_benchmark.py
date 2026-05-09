@@ -26,7 +26,28 @@
 import os
 import json
 import gc
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+
+
+def load_dotenv_file(path: Path) -> None:
+    """Load simple KEY=VALUE lines from .env without overwriting shell env."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv_file(REPO_ROOT / ".env")
 
 COMPUTE_TIER = os.environ.get("COMPUTE_TIER", "T4").upper()
 
@@ -43,11 +64,28 @@ else:
     LIMIT_ALPACA = 250
     BATCH_SIZE = 4
 
-REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+LIMIT_IFEVAL = int(os.environ.get("LIMIT_IFEVAL", LIMIT_IFEVAL))
+LIMIT_GSM8K = int(os.environ.get("LIMIT_GSM8K", LIMIT_GSM8K))
+LIMIT_MMLU = int(os.environ.get("LIMIT_MMLU", LIMIT_MMLU))
+LIMIT_ALPACA = int(os.environ.get("LIMIT_ALPACA", LIMIT_ALPACA))
+BATCH_SIZE = int(os.environ.get("BENCH_BATCH_SIZE", BATCH_SIZE))
+LM_EVAL_TIMEOUT = int(os.environ.get("LM_EVAL_TIMEOUT", "2400"))
+LM_EVAL_MAX_NEW_TOKENS = int(os.environ.get("LM_EVAL_MAX_NEW_TOKENS", "128"))
+
 SFT_PATH = REPO_ROOT / "adapters" / "sft-mini"
 DPO_PATH = REPO_ROOT / "adapters" / "dpo"
 EVAL_OUT = REPO_ROOT / "data" / "eval"
 EVAL_OUT.mkdir(parents=True, exist_ok=True)
+BENCHMARK_RESULTS_PATH = EVAL_OUT / "benchmark_results.json"
+PRESERVE_SKIPPED_METRICS = os.environ.get("PRESERVE_SKIPPED_METRICS", "1") != "0"
+
+if BENCHMARK_RESULTS_PATH.exists():
+    try:
+        PREVIOUS_BENCHMARK_RESULTS = json.loads(BENCHMARK_RESULTS_PATH.read_text())
+    except Exception:
+        PREVIOUS_BENCHMARK_RESULTS = {}
+else:
+    PREVIOUS_BENCHMARK_RESULTS = {}
 
 assert SFT_PATH.exists(), "NB1 must run first"
 assert DPO_PATH.exists(), "NB3 must run first"
@@ -57,6 +95,7 @@ print(f"IFEval:          {LIMIT_IFEVAL} prompts")
 print(f"GSM8K:           {LIMIT_GSM8K} problems")
 print(f"MMLU:            {LIMIT_MMLU} questions")
 print(f"AlpacaEval-lite: {LIMIT_ALPACA} prompts")
+print(f"lm-eval max new tokens: {LM_EVAL_MAX_NEW_TOKENS}")
 print(f"output:          {EVAL_OUT}")
 
 # %%
@@ -71,14 +110,37 @@ assert torch.cuda.is_available(), "Need GPU. See HARDWARE-GUIDE.md."
 import subprocess
 
 
+def prepare_lm_eval_base() -> str:
+    """Return a local HF snapshot path with bounded generation config.
+
+    The Unsloth Qwen bnb snapshots ship with generation_config.max_new_tokens=2048.
+    Transformers lets that override lm-eval's max_length, so IFEval can hang on
+    tiny limits. Capping the cached generation config keeps NB6 runnable.
+    """
+    from huggingface_hub import snapshot_download
+
+    base = "unsloth/Qwen2.5-3B-bnb-4bit" if COMPUTE_TIER == "T4" else "unsloth/Qwen2.5-7B-bnb-4bit"
+    snapshot = Path(snapshot_download(base))
+    gen_config_path = snapshot / "generation_config.json"
+    if gen_config_path.exists() and LM_EVAL_MAX_NEW_TOKENS > 0:
+        gen_config = json.loads(gen_config_path.read_text())
+        if gen_config.get("max_new_tokens") != LM_EVAL_MAX_NEW_TOKENS:
+            gen_config["max_new_tokens"] = LM_EVAL_MAX_NEW_TOKENS
+            gen_config_path.write_text(json.dumps(gen_config, indent=2))
+            print(f"Patched {gen_config_path} max_new_tokens={LM_EVAL_MAX_NEW_TOKENS}")
+    return str(snapshot)
+
+
+LM_EVAL_BASE = prepare_lm_eval_base()
+
+
 def run_lm_eval(adapter_path, tasks, limit, num_fewshot, label):
     """Run lm-eval-harness with PEFT adapter on top of base, return parsed metrics."""
-    base = "unsloth/Qwen2.5-3B-bnb-4bit" if COMPUTE_TIER == "T4" else "unsloth/Qwen2.5-7B-bnb-4bit"
     out_dir = EVAL_OUT / f"lm-{label}-{tasks}"
     cmd = [
-        "lm_eval",
+        sys.executable, "-m", "lm_eval", "run",
         "--model", "hf",
-        "--model_args", f"pretrained={base},peft={adapter_path},load_in_4bit=True",
+        "--model_args", f"pretrained={LM_EVAL_BASE},peft={adapter_path}",
         "--tasks", tasks,
         "--num_fewshot", str(num_fewshot),
         "--limit", str(limit),
@@ -87,12 +149,16 @@ def run_lm_eval(adapter_path, tasks, limit, num_fewshot, label):
         "--output_path", str(out_dir),
     ]
     print(f"\n{'=' * 60}\nRunning lm-eval [{label}]: {tasks}\n{'=' * 60}")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
+    print(" ".join(str(part) for part in cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=LM_EVAL_TIMEOUT)
 
     out_files = sorted(out_dir.glob("**/results*.json"))
     if not out_files:
-        print("WARN: lm-eval didn't write results JSON. STDOUT tail:")
+        print(f"WARN: lm-eval didn't write results JSON (returncode={proc.returncode}).")
+        print("STDOUT tail:")
         print(proc.stdout[-1000:])
+        print("STDERR tail:")
+        print(proc.stderr[-2000:])
         return {"error": "no_results"}
     return json.loads(out_files[-1].read_text())["results"]
 
@@ -106,14 +172,19 @@ def run_lm_eval(adapter_path, tasks, limit, num_fewshot, label):
 
 # %%
 print(">>> SFT-only on IFEval")
-sft_ifeval = run_lm_eval(SFT_PATH, "ifeval", LIMIT_IFEVAL, num_fewshot=0, label="sft")
-gc.collect()
-torch.cuda.empty_cache()
+if LIMIT_IFEVAL > 0:
+    sft_ifeval = run_lm_eval(SFT_PATH, "ifeval", LIMIT_IFEVAL, num_fewshot=0, label="sft")
+    gc.collect()
+    torch.cuda.empty_cache()
 
-print(">>> SFT+DPO on IFEval")
-dpo_ifeval = run_lm_eval(DPO_PATH, "ifeval", LIMIT_IFEVAL, num_fewshot=0, label="dpo")
-gc.collect()
-torch.cuda.empty_cache()
+    print(">>> SFT+DPO on IFEval")
+    dpo_ifeval = run_lm_eval(DPO_PATH, "ifeval", LIMIT_IFEVAL, num_fewshot=0, label="dpo")
+    gc.collect()
+    torch.cuda.empty_cache()
+else:
+    print("Skipping IFEval because LIMIT_IFEVAL <= 0")
+    sft_ifeval = {"error": "skipped"}
+    dpo_ifeval = {"error": "skipped"}
 
 # %% [markdown]
 # ## 3. GSM8K — Grade-School Math (alignment tax probe)
@@ -123,14 +194,19 @@ torch.cuda.empty_cache()
 
 # %%
 print(">>> SFT-only on GSM8K")
-sft_gsm8k = run_lm_eval(SFT_PATH, "gsm8k", LIMIT_GSM8K, num_fewshot=8, label="sft")
-gc.collect()
-torch.cuda.empty_cache()
+if LIMIT_GSM8K > 0:
+    sft_gsm8k = run_lm_eval(SFT_PATH, "gsm8k", LIMIT_GSM8K, num_fewshot=8, label="sft")
+    gc.collect()
+    torch.cuda.empty_cache()
 
-print(">>> SFT+DPO on GSM8K")
-dpo_gsm8k = run_lm_eval(DPO_PATH, "gsm8k", LIMIT_GSM8K, num_fewshot=8, label="dpo")
-gc.collect()
-torch.cuda.empty_cache()
+    print(">>> SFT+DPO on GSM8K")
+    dpo_gsm8k = run_lm_eval(DPO_PATH, "gsm8k", LIMIT_GSM8K, num_fewshot=8, label="dpo")
+    gc.collect()
+    torch.cuda.empty_cache()
+else:
+    print("Skipping GSM8K because LIMIT_GSM8K <= 0")
+    sft_gsm8k = {"error": "skipped"}
+    dpo_gsm8k = {"error": "skipped"}
 
 # %% [markdown]
 # ## 4. MMLU — Broad knowledge (sampled)
@@ -140,14 +216,19 @@ torch.cuda.empty_cache()
 
 # %%
 print(">>> SFT-only on MMLU (sampled)")
-sft_mmlu = run_lm_eval(SFT_PATH, "mmlu", LIMIT_MMLU, num_fewshot=5, label="sft")
-gc.collect()
-torch.cuda.empty_cache()
+if LIMIT_MMLU > 0:
+    sft_mmlu = run_lm_eval(SFT_PATH, "mmlu", LIMIT_MMLU, num_fewshot=5, label="sft")
+    gc.collect()
+    torch.cuda.empty_cache()
 
-print(">>> SFT+DPO on MMLU (sampled)")
-dpo_mmlu = run_lm_eval(DPO_PATH, "mmlu", LIMIT_MMLU, num_fewshot=5, label="dpo")
-gc.collect()
-torch.cuda.empty_cache()
+    print(">>> SFT+DPO on MMLU (sampled)")
+    dpo_mmlu = run_lm_eval(DPO_PATH, "mmlu", LIMIT_MMLU, num_fewshot=5, label="dpo")
+    gc.collect()
+    torch.cuda.empty_cache()
+else:
+    print("Skipping MMLU because LIMIT_MMLU <= 0")
+    sft_mmlu = {"error": "skipped"}
+    dpo_mmlu = {"error": "skipped"}
 
 # %% [markdown]
 # ## 5. AlpacaEval-lite — Win-rate vs reference (judge-based)
@@ -348,6 +429,18 @@ metrics = {
     },
 }
 
+if PRESERVE_SKIPPED_METRICS:
+    previous_metrics = PREVIOUS_BENCHMARK_RESULTS.get("metrics", {})
+    for bench, scores in metrics.items():
+        previous_scores = previous_metrics.get(bench, {})
+        for model_name, value in list(scores.items()):
+            if value == value:
+                continue
+            previous_value = previous_scores.get(model_name)
+            if isinstance(previous_value, (int, float)) and previous_value == previous_value:
+                scores[model_name] = previous_value
+                print(f"Preserved previous {bench} {model_name} score: {previous_value:.3f}")
+
 print("\n" + "=" * 60)
 print("BENCHMARK RESULTS")
 print("=" * 60)
@@ -417,10 +510,10 @@ final = {
     "deltas": {b: metrics[b]["dpo"] - metrics[b]["sft"]
                for b in bench_names if metrics[b]["sft"] == metrics[b]["sft"]},
 }
-(EVAL_OUT / "benchmark_results.json").write_text(
+BENCHMARK_RESULTS_PATH.write_text(
     json.dumps(final, ensure_ascii=False, indent=2)
 )
-print(f"\nSaved {EVAL_OUT / 'benchmark_results.json'}")
+print(f"\nSaved {BENCHMARK_RESULTS_PATH}")
 
 # %% [markdown]
 # ## 8. Vibe-coding callout — interpret your numbers

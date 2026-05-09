@@ -64,6 +64,20 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 print(f"Tokenizer: {tokenizer.__class__.__name__}  vocab={tokenizer.vocab_size:,}")
 
+
+def render_chat(messages, *, add_generation_prompt=False):
+    if tokenizer.chat_template:
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt
+        )
+    text = "".join(
+        f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n"
+        for message in messages
+    )
+    if add_generation_prompt:
+        text += "<|im_start|>assistant\n"
+    return text
+
 # %% [markdown]
 # ## 2. Load UltraFeedback (English baseline)
 #
@@ -90,9 +104,7 @@ print(f"Loaded {len(ds)} pairs. Columns: {ds.column_names}")
 # %%
 def format_pref(row):
     prompt_msgs = [{"role": "user", "content": row["prompt"]}]
-    prompt_text = tokenizer.apply_chat_template(
-        prompt_msgs, tokenize=False, add_generation_prompt=True
-    )
+    prompt_text = render_chat(prompt_msgs, add_generation_prompt=True)
     # `chosen` and `rejected` in this dataset are list-of-dicts with role/content.
     # Take just the assistant turn text (last message).
     chosen_text = row["chosen"][-1]["content"] if isinstance(row["chosen"], list) else row["chosen"]
